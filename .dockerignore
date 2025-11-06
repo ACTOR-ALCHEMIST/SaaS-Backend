@@ -1,0 +1,16 @@
+# Virtual environments
+venv_saas_backend/
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Git & editor
+.git/
+.gitignore
+.DS_Store
+.idea/
+.vscode/
+
+# Build artifacts
+*.log

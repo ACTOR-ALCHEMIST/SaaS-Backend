@@ -1,0 +1,12 @@
+# This file tells gcloud which files to ignore when uploading.
+# https://cloud.google.com/sdk/gcloud/reference/topic/gcloudignore
+
+.git/
+*.pyc
+__pycache__/
+.venv/
+venv_saas_backend/
+.DS_Store
+.idea/
+.vscode/
+*.log

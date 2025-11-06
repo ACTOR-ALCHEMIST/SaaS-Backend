@@ -1,0 +1,32 @@
+# Bytecode and caches
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+venv_saas_backend/
+.venv/
+
+# Environment & secrets
+.env
+.env.*
+
+# Tooling
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+dist/
+build/
+
+# Editor & OS specifics
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Containers & deployment artifacts generated locally
+*.local.yaml
