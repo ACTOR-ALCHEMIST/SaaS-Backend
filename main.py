@@ -119,6 +119,7 @@ default_origins = {
     "http://localhost:3000",
     "http://localhost:3001",
     "https://fastanswerai.com",
+    "https://www.fastanswerai.com",
 }
 
 app.add_middleware(
