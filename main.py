@@ -1,16 +1,48 @@
 import base64
 import os
+from pathlib import Path
 from typing import Any, Optional
 
+
 try:
-    from google import genai as google_genai  # type: ignore
-    from google.genai import types as genai_types  # type: ignore
-    USING_GENAI_CLIENT = True
-except ImportError:  # pragma: no cover
-    import google.generativeai as google_genai  # type: ignore
-    from google.generativeai import types as genai_types  # type: ignore
-    USING_GENAI_CLIENT = False
-from dotenv import load_dotenv
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - optional helper
+    def load_dotenv(*args: Any, **kwargs: Any) -> bool:
+        """
+        Minimal fallback loader so local development keeps working even when
+        python-dotenv is missing (e.g. running outside the project venv).
+        """
+        dotenv_path = kwargs.get("dotenv_path")
+        if not dotenv_path and args:
+            dotenv_path = args[0]
+        dotenv_path = Path(dotenv_path or ".env")
+        if not dotenv_path.exists():
+            print(
+                "Warning: python-dotenv is not installed and .env file was not found."
+            )
+            return False
+
+        loaded = False
+        for line in dotenv_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+                loaded = True
+
+        if not loaded:
+            print(
+                "Warning: python-dotenv is not installed. No environment variables were "
+                "loaded from the fallback parser."
+            )
+        return loaded
+
 from fastapi import (
     Depends,
     FastAPI,
@@ -21,20 +53,42 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from supabase import Client, create_client
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ModuleNotFoundError:
+    genai = None  # type: ignore[assignment]
+    genai_types = None  # type: ignore[assignment]
+
+try:
+    from supabase import Client, create_client
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    Client = Any  # type: ignore[assignment]
+
+    def create_client(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(
+            "Supabase SDK is not installed. Install `supabase` to enable database access."
+        )
+
+    print(
+        "Warning: Supabase SDK (`supabase` package) not installed. "
+        "Database features will be unavailable."
+    )
 
 # 加载 .env 文件 (仅用于本地开发)
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(PROJECT_ROOT / ".env")
 
 # --- 环境变量配置 ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 GOOGLE_AI_API_KEY = os.environ.get("GOOGLE_AI_API_KEY")
+GENAI_MODEL_ID = os.environ.get("GENAI_MODEL_ID", "gemini-2.5-flash-image")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").strip()
 
 SERVICE_NAME = "image_generation"
 IMAGE_COST = 1
-MODEL_NAME = "gemini-2.5-flash-image"
 
 # --- 服务客户端初始化 ---
 supabase: Optional[Client] = None
@@ -47,15 +101,15 @@ except Exception as exc:  # pragma: no cover - initialization log
 
 genai_client: Optional[Any] = None
 try:
+    if genai is None:
+        raise ModuleNotFoundError(
+            "Google GenAI SDK not installed. Install `google-genai` (>=1.0.0)."
+        )
     if not GOOGLE_AI_API_KEY:
         raise ValueError("Google AI API key is missing.")
-    if USING_GENAI_CLIENT:
-        genai_client = google_genai.Client(api_key=GOOGLE_AI_API_KEY)
-    else:
-        google_genai.configure(api_key=GOOGLE_AI_API_KEY)
-        genai_client = google_genai.GenerativeModel(MODEL_NAME)
+    genai_client = genai.Client(api_key=GOOGLE_AI_API_KEY)
 except Exception as exc:  # pragma: no cover - initialization log
-    print(f"Error initializing Google AI: {exc}")
+    print(f"Error initializing Google GenAI client: {exc}")
 
 app = FastAPI(title="SaaS Backend API")
 
@@ -96,7 +150,7 @@ async def _ensure_supabase() -> Client:
 
 
 async def _ensure_genai_client() -> Any:
-    """Raise a 503 if the Gemini client is unavailable."""
+    """Raise a 503 if the image generation client is unavailable."""
     if genai_client is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -118,40 +172,6 @@ def _decode_base64_payload(payload: str) -> bytes:
     if "," in payload:
         payload = payload.split(",", 1)[1]
     return base64.b64decode(payload)
-
-
-def _make_text_part(text: str) -> Any:
-    """Create a text Part compatible with both new and legacy Gemini SDKs."""
-    part_type = getattr(genai_types, "Part", None)
-    part_factory = getattr(part_type, "from_text", None) if part_type else None
-    if callable(part_factory):
-        return part_factory(text)
-    return {"text": text}
-
-
-def _make_image_part(image_bytes: bytes, mime_type: str) -> Any:
-    """Create an image Part compatible with both new and legacy Gemini SDKs."""
-    part_type = getattr(genai_types, "Part", None)
-    part_factory = getattr(part_type, "from_bytes", None) if part_type else None
-    if callable(part_factory):
-        return part_factory(image_bytes, mime_type=mime_type)
-    return {
-        "inline_data": {
-            "mime_type": mime_type,
-            "data": image_bytes,
-        }
-    }
-
-
-def _make_content(parts: list[Any]) -> Any:
-    """Wrap parts into a Content structure compatible with both SDKs."""
-    content_cls = getattr(genai_types, "Content", None)
-    if content_cls is not None:
-        try:
-            return content_cls(parts=parts)
-        except TypeError:
-            return content_cls(role="user", parts=parts)
-    return {"role": "user", "parts": parts}
 
 
 # --- 依赖项：JWT 验证 ---
@@ -257,7 +277,8 @@ async def generate_image(
     mime_type = (reference_image_mime_type or "image/png").strip() or "image/png"
     generation_mode = "edit" if reference_bytes else "generate"
 
-    # 1. 检查并扣费
+    # 1. 检查余额
+    current_balance: int = 0
     try:
         wallet_res = (
             client.table("wallets")
@@ -292,21 +313,6 @@ async def generate_image(
                 detail="Insufficient credits",
             )
 
-        ledger_payload = {
-            "user_id": user_id,
-            "amount": IMAGE_COST,
-            "type": "debit",
-            "source": SERVICE_NAME,
-            "metadata": {
-                "prompt_length": len(prompt),
-                "mode": generation_mode,
-            },
-        }
-        ledger_res = client.table("ledger_entries").insert(ledger_payload).execute()
-        ledger_error = _response_error_message(ledger_res)
-        if ledger_error:
-            raise RuntimeError(ledger_error)
-
     except HTTPException:
         raise
     except Exception as exc:
@@ -316,54 +322,99 @@ async def generate_image(
             detail=f"Database processing error: {exc}",
         ) from exc
 
-    # 2. 调用 AI
+    # 2. 调用 Gemini
     try:
         print(f"Generating image for user {user_id} prompt: {prompt}")
-        if USING_GENAI_CLIENT:
-            contents: list[Any] = [prompt]
-            if reference_bytes is not None:
-                contents.append(_make_image_part(reference_bytes, mime_type))
-
-            response = image_client.models.generate_content(
-                model=MODEL_NAME,
-                contents=contents,
+        contents: list[Any] = [prompt]
+        if reference_bytes is not None:
+            if genai_types is None or not hasattr(genai_types, "Part"):
+                raise RuntimeError(
+                    "google-genai types module is unavailable for reference images."
+                )
+            contents.append(
+                genai_types.Part.from_bytes(reference_bytes, mime_type=mime_type)
             )
-        else:
-            if reference_bytes is None:
-                response = image_client.generate_content(prompt)
-            else:
-                parts = [
-                    _make_text_part(prompt),
-                    _make_image_part(reference_bytes, mime_type),
-                ]
-                response = image_client.generate_content([_make_content(parts)])
 
-        parts = getattr(response, "parts", None) or []
-        if not parts and getattr(response, "candidates", None):
-            candidate = response.candidates[0]
-            content = getattr(candidate, "content", None)
-            parts = getattr(content, "parts", []) if content else []
-        image_part = next(
-            (part for part in parts if getattr(part, "inline_data", None)), None
+        response = image_client.models.generate_content(
+            model=GENAI_MODEL_ID,
+            contents=contents,
         )
-        text_part = next((part for part in parts if getattr(part, "text", None)), None)
 
-        if not image_part or not getattr(image_part.inline_data, "data", None):
+        image_data: Optional[str] = None
+        alt_text: Optional[str] = None
+
+        def _scan_parts(parts: list[Any]) -> None:
+            nonlocal image_data, alt_text
+            for part in parts:
+                text_val = getattr(part, "text", None)
+                if text_val and not alt_text:
+                    alt_text = text_val
+                inline = getattr(part, "inline_data", None)
+                data = getattr(inline, "data", None) if inline else None
+                if data and image_data is None:
+                    if isinstance(data, bytes):
+                        image_data = base64.b64encode(data).decode("utf-8")
+                    else:
+                        image_data = data
+
+        primary_parts = list(getattr(response, "parts", []) or [])
+        if primary_parts:
+            _scan_parts(primary_parts)
+
+        if image_data is None and getattr(response, "candidates", None):
+            candidate_parts = list(
+                getattr(response.candidates[0], "parts", []) or []
+            )
+            _scan_parts(candidate_parts)
+
+        if image_data is None:
             raise RuntimeError("No image data found in Gemini response.")
 
-        image_data = image_part.inline_data.data
-        if isinstance(image_data, bytes):
-            image_data = base64.b64encode(image_data).decode("utf-8")
-        text_data = getattr(text_part, "text", None) if text_part else None
+        response_id = getattr(response, "response_id", None)
+    except Exception as exc:
+        print(f"AI generation failed for user {user_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"AI generation failed: {exc}",
+        ) from exc
+
+    # 3. 扣费并记录
+    try:
+        new_balance = max(0, (current_balance or 0) - IMAGE_COST)
+        update_res = (
+            client.table("wallets")
+            .update({"balance": new_balance})
+            .eq("user_id", user_id)
+            .execute()
+        )
+        update_error = _response_error_message(update_res)
+        if update_error:
+            raise RuntimeError(update_error)
+
+        ledger_payload = {
+            "user_id": user_id,
+            "amount": IMAGE_COST,
+            "type": "debit",
+            "source": SERVICE_NAME,
+            "metadata": {
+                "prompt_length": len(prompt),
+                "mode": generation_mode,
+                "reference_provided": reference_bytes is not None,
+            },
+        }
+        ledger_res = client.table("ledger_entries").insert(ledger_payload).execute()
+        ledger_error = _response_error_message(ledger_res)
+        if ledger_error:
+            raise RuntimeError(ledger_error)
 
         usage_payload = {
             "user_id": user_id,
             "service": SERVICE_NAME,
             "cost": IMAGE_COST,
             "prompt": prompt,
-            "response_id": getattr(response, "response_id", None),
+            "response_id": response_id,
             "metadata": {
-                "model": MODEL_NAME,
+                "model": GENAI_MODEL_ID,
                 "prompt_length": len(prompt),
                 "mode": generation_mode,
                 "reference_provided": reference_bytes is not None,
@@ -374,14 +425,14 @@ async def generate_image(
         if usage_error:
             print(f"Usage event logging warning for user {user_id}: {usage_error}")
 
-        return {"image_base64": image_data, "alt_text": text_data or prompt}
-
     except Exception as exc:
-        print(f"AI generation failed for user {user_id}: {exc}")
+        print(f"Post-generation bookkeeping failed for user {user_id}: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"AI generation failed: {exc}",
+            detail=f"Post-processing failed: {exc}",
         ) from exc
+
+    return {"image_base64": image_data, "alt_text": alt_text or prompt}
 
 
 if __name__ == "__main__":
