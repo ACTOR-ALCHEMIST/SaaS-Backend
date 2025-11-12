@@ -358,15 +358,32 @@ async def generate_image(
                     else:
                         image_data = data
 
-        primary_parts = list(getattr(response, "parts", []) or [])
-        if primary_parts:
-            _scan_parts(primary_parts)
+        def _scan_content(obj: Any) -> None:
+            _scan_parts(list(getattr(obj, "parts", []) or []))
 
-        if image_data is None and getattr(response, "candidates", None):
-            candidate_parts = list(
-                getattr(response.candidates[0], "parts", []) or []
-            )
-            _scan_parts(candidate_parts)
+        visited: set[int] = set()
+
+        def _walk(obj: Any) -> None:
+            if obj is None:
+                return
+            try:
+                marker = id(obj)
+            except Exception:
+                marker = None
+            if marker is not None:
+                if marker in visited:
+                    return
+                visited.add(marker)
+            _scan_parts(list(getattr(obj, "parts", []) or []))
+            for attr in ("generated_content", "contents", "candidates"):
+                items = getattr(obj, attr, None)
+                if isinstance(items, list):
+                    for child in items:
+                        _walk(child)
+                elif items is not None:
+                    _walk(items)
+
+        _walk(response)
 
         if image_data is None:
             raise RuntimeError("No image data found in Gemini response.")
